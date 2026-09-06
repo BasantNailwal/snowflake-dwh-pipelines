@@ -52,8 +52,17 @@ def assert_branch_is_current(target_ref: str) -> None:
         ) from exc
 
 
-def branch_files(target_ref: str) -> list[Path]:
-    names = run_git("diff", f"{target_ref}...HEAD", "--name-only", "--diff-filter=ACMR")
+# def branch_files(target_ref: str) -> list[Path]:
+#     names = run_git("diff", f"{target_ref}...HEAD", "--name-only", "--diff-filter=ACMR")
+#     return [Path(name) for name in names.splitlines() if name]
+
+def branch_files(target_ref: str, include_uncommitted: bool = False) -> list[Path]:
+    if include_uncommitted:
+        # target_ref se lekar current working tree (staged + unstaged) ka diff
+        names = run_git("diff", target_ref, "--name-only", "--diff-filter=ACMR")
+    else:
+        # Normal committed branch diff
+        names = run_git("diff", f"{target_ref}...HEAD", "--name-only", "--diff-filter=ACMR")
     return [Path(name) for name in names.splitlines() if name]
 
 
@@ -210,16 +219,58 @@ def print_plan(
     return pending
 
 
+# def deploy(args: argparse.Namespace) -> int:
+#     root = Path(args.repo_root).resolve()
+#     assert_branch_is_current(args.target_ref)
+#     changed = collect_artifacts(branch_files(args.target_ref), root)
+#     if not changed:
+#         print("No supported artifacts changed in the branch scope.")
+#         return 0
+
+#     session = create_session(args.connection_name, args.warehouse, args.password_auth)
+#     deployment_id = str(uuid.uuid4())
+#     commit = run_git("rev-parse", "HEAD")
+#     transaction_started = False
+#     try:
+#         active_hashes = load_active_hashes(session, args.environment)
+#         pending = print_plan(changed, active_hashes)
+
+#         if args.dry_run:
+#             print("Dry run complete. No Snowflake artifacts or ledger rows were changed.")
+#             return 0
+
+#         session.sql("begin").collect()
+#         transaction_started = True
+
+#         for artifact in pending:
+#             if artifact.path.suffix.lower() == ".sql":
+#                 execute_sql_file(session, artifact)
+#             else:
+#                 upload_python_file(session, artifact)
+#             retire_and_record(session, artifact, args.environment, commit, deployment_id)
+#         session.sql("commit").collect()
+#     except Exception:
+#         if transaction_started:
+#             session.sql("rollback").collect()
+#         raise
+#     finally:
+#         session.close()
+#     return 0
+
 def deploy(args: argparse.Namespace) -> int:
     root = Path(args.repo_root).resolve()
     assert_branch_is_current(args.target_ref)
-    changed = collect_artifacts(branch_files(args.target_ref), root)
+    
+    # Dry run ke time uncommitted changes include karein:
+    changed = collect_artifacts(branch_files(args.target_ref, include_uncommitted=args.dry_run), root)
     if not changed:
         print("No supported artifacts changed in the branch scope.")
         return 0
 
     session = create_session(args.connection_name, args.warehouse, args.password_auth)
     deployment_id = str(uuid.uuid4())
+    
+    # Commit hash sirf tab strictly check karein jab actual deploy ho
     commit = run_git("rev-parse", "HEAD")
     transaction_started = False
     try:
@@ -247,7 +298,6 @@ def deploy(args: argparse.Namespace) -> int:
     finally:
         session.close()
     return 0
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
