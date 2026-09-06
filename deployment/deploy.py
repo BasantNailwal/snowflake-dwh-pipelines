@@ -43,6 +43,22 @@ def run_git(*args: str) -> str:
     return result.stdout.strip()
 
 
+def environment_tag(environment: str, configured_tag: str | None) -> str:
+    return configured_tag or f"env-{environment.lower()}"
+
+
+def update_environment_tag(
+    environment: str, configured_tag: str | None, push: bool
+) -> None:
+    tag = environment_tag(environment, configured_tag)
+    commit = run_git("rev-parse", "HEAD")
+    run_git("tag", "--force", tag, commit, "-m", f"{environment} deployed {commit[:12]}")
+    LOGGER.info("Updated environment tag %s -> %s", tag, commit)
+    if push:
+        run_git("push", "origin", f"refs/tags/{tag}:refs/tags/{tag}", "--force")
+        LOGGER.info("Pushed environment tag %s to origin", tag)
+
+
 def ref_exists(ref: str) -> bool:
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", ref],
@@ -267,7 +283,15 @@ def print_plan(
     return pending
 
 
+def print_tag_plan(environment: str, configured_tag: str | None) -> None:
+    tag = environment_tag(environment, configured_tag)
+    commit = run_git("rev-parse", "HEAD")
+    print(f"Environment tag: {tag} -> {commit} (dry run; tag will not change)")
+
+
 def deploy(args: argparse.Namespace) -> int:
+    if args.push_environment_tag and not args.update_environment_tag:
+        raise ValueError("--push-environment-tag requires --update-environment-tag")
     root = Path(args.repo_root).resolve()
     target_ref = resolve_target_ref(args.environment, args.target_ref)
     if not args.dry_run:
@@ -279,6 +303,12 @@ def deploy(args: argparse.Namespace) -> int:
     )
     if not changed:
         print("No supported artifacts changed in the branch scope.")
+        if args.dry_run and args.update_environment_tag:
+            print_tag_plan(args.environment, args.environment_tag)
+        elif not args.dry_run and args.update_environment_tag:
+            update_environment_tag(
+                args.environment, args.environment_tag, args.push_environment_tag
+            )
         return 0
 
     session = create_session(args.connection_name, args.warehouse, args.password_auth)
@@ -291,6 +321,8 @@ def deploy(args: argparse.Namespace) -> int:
         pending = print_plan(changed, active_hashes)
 
         if args.dry_run:
+            if args.update_environment_tag:
+                print_tag_plan(args.environment, args.environment_tag)
             print("Dry run complete. No Snowflake artifacts or ledger rows were changed.")
             return 0
 
@@ -304,6 +336,11 @@ def deploy(args: argparse.Namespace) -> int:
                 upload_python_file(session, artifact)
             retire_and_record(session, artifact, args.environment, commit, deployment_id)
         session.sql("commit").collect()
+        transaction_started = False
+        if args.update_environment_tag:
+            update_environment_tag(
+                args.environment, args.environment_tag, args.push_environment_tag
+            )
     except Exception:
         if transaction_started:
             session.sql("rollback").collect()
@@ -352,6 +389,21 @@ def parse_args() -> argparse.Namespace:
         "--skip-ancestor-check",
         action="store_true",
         help="Skip the target ancestry guardrail with a warning; emergency/local testing only",
+    )
+    parser.add_argument(
+        "--environment-tag",
+        help="Mutable Git tag used as the environment promotion baseline; defaults to env-<environment>",
+    )
+    parser.add_argument(
+        "--update-environment-tag",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Update the environment tag after a successful live deployment (default: enabled)",
+    )
+    parser.add_argument(
+        "--push-environment-tag",
+        action="store_true",
+        help="Force-push the updated environment tag to origin; requires --update-environment-tag",
     )
     return parser.parse_args()
 
