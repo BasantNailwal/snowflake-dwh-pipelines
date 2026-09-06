@@ -165,6 +165,8 @@ def pending_artifacts(
     for artifact in changed:
         if artifact.path.suffix.lower() != ".py":
             continue
+        if active_hashes.get(artifact.key) == artifact.sha256:
+            continue
         companion = artifact.path.with_suffix(".sql")
         if not companion.is_file():
             raise ValueError(f"Snowpark file requires companion procedure SQL: {artifact.key}")
