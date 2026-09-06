@@ -1,6 +1,6 @@
 # Snowflake deployment blueprint
 
-This framework treats Git as the requested change set and Snowflake as the applied-state authority. A file is deployed only when it is in `git diff origin/main...HEAD --name-only`, is under `SQL/`, `FILES/`, `SNOWPARK/`, or `snowflake/`, and its SHA-256 differs from the active ledger row for the target environment.
+This framework treats Git as the requested change set and Snowflake as the applied-state authority. A file is deployed only when it is in the resolved target-to-`HEAD` scope, is under `SQL/`, `FILES/`, `SNOWPARK/`, or `snowflake/`, and its SHA-256 differs from the active ledger row for the target environment.
 
 ## Repository layout
 
@@ -36,13 +36,14 @@ Run [deployment/ledger.sql](deployment/ledger.sql) once in the deployment schema
 
 The engine performs the ledger read, artifact execution, and ledger version updates in one Snowpark session and explicitly commits or rolls back. The ledger writes are transactionally grouped, but Snowflake DDL can implicitly commit, so a failed DDL deployment cannot be treated as a guaranteed database rollback. The sequence is:
 
-1. Verify `origin/main` is an ancestor of `HEAD`.
-2. Read only added, copied, modified, and renamed files from the three-dot diff.
-3. Hash file bytes with SHA-256.
-4. Read active hashes for the target environment.
-5. Execute only hash misses: `.sql` through Snowpark SQL, `.py` through `register(session)`.
-6. Set the old ledger row inactive and insert the new active row.
-7. Commit the ledger state, or roll back uncommitted ledger work. If DDL has already committed, reconcile the object and ledger before retrying.
+1. Resolve the explicit `--target-ref`, or choose an environment convention and fall back to `origin/main`.
+2. Verify the target ref is an ancestor of `HEAD`, unless the emergency override is used.
+3. Read committed changes from the three-dot diff; dry runs additionally include staged, unstaged, and untracked files.
+4. Hash file bytes with SHA-256.
+5. Read active hashes for the target environment.
+6. Execute only hash misses: `.sql` through Snowpark SQL, `.py` through stage upload and companion SQL.
+7. Set the old ledger row inactive and insert the new active row.
+8. Commit the ledger state, or roll back uncommitted ledger work. If DDL has already committed, reconcile the object and ledger before retrying.
 
 Deleted files are intentionally ignored. A deletion is a deployment design decision: use an explicit SQL migration for a table, or a deliberate replacement definition for a stateless object. Never infer a destructive database operation from a branch diff. `FILES/` is an allowed input root, but the current engine executes only `.sql` and `.py`; files such as `FILES/data.csv` require a separate staged-load step and are not silently treated as SQL. Artifacts are sorted by path, so `SNOWPARK/00_create_stage.sql` runs before the Python upload and its companion procedure SQL. If a Python hash changes, the companion SQL is redeployed even when its own hash is unchanged, ensuring the procedure package picks up the new staged source.
 
@@ -50,9 +51,9 @@ Deleted files are intentionally ignored. A deletion is a deployment design decis
 
 ```powershell
 python -m pip install -r requirements.txt
-python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --warehouse DEV_WH --password-auth
+python deployment/deploy.py --environment DEV --connection-name dev --warehouse DEV_WH --password-auth
 # Preview only; reads the ledger but does not execute or mutate anything.
-python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --warehouse DEV_WH --password-auth --dry-run
+python deployment/deploy.py --environment DEV --connection-name dev --warehouse DEV_WH --password-auth --dry-run
 ```
 
 Dry-run output lists every branch-scoped artifact whose active environment hash
@@ -61,7 +62,7 @@ It still requires Snowflake credentials because the active ledger is the source
 of truth. It does not start a transaction, execute SQL or Python registration
 code, or write ledger rows.
 
-For local execution, `--connection-name dev` reads the named connection from the Snowflake connector's `connections.toml` file, normally `~/.snowflake/connections.toml` on Windows. `--password-auth` explicitly switches that profile to username/password authentication, and `--warehouse DEV_WH` overrides a missing or placeholder warehouse. Replace `DEV_WH` with a real warehouse name. You can also set `SNOWFLAKE_CONNECTION_NAME=dev` and `SNOWFLAKE_WAREHOUSE`. If no connection name is supplied, the engine uses `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production.
+For local execution, `--connection-name dev` reads the named connection from the Snowflake connector's `connections.toml` file, normally `~/.snowflake/connections.toml` on Windows. `--password-auth` explicitly switches that profile to username/password authentication, and `--warehouse DEV_WH` overrides a missing or placeholder warehouse. Replace `DEV_WH` with a real warehouse name. Omit `--target-ref` to use `env-dev`, `origin/env-dev`, `origin/dev`, an `env-dev` tag, or `origin/main`, in that order. You can also set `SNOWFLAKE_CONNECTION_NAME=dev` and `SNOWFLAKE_WAREHOUSE`. If no connection name is supplied, the engine uses `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production.
 
 ## Rollback and guardrails
 
