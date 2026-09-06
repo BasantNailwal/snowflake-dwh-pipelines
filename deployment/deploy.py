@@ -15,6 +15,7 @@ import subprocess
 import tomllib
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -36,11 +37,45 @@ class Artifact:
     sha256: str
 
 
+def artifact_type(artifact: Artifact) -> str:
+    if artifact.path.suffix.lower() == ".py":
+        return "SNOWPARK_PY"
+    if "tables" in artifact.path.parts:
+        return "TABLE_MIGRATION"
+    if "views" in artifact.path.parts:
+        return "VIEW"
+    if "procedures" in artifact.path.parts:
+        return "PROCEDURE"
+    if "functions" in artifact.path.parts:
+        return "FUNCTION"
+    return "SQL"
+
+
+def release_tag() -> str | None:
+    try:
+        return run_git("describe", "--exact-match", "--tags", "HEAD")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def deployment_context() -> tuple[str | None, str]:
+    return (
+        os.environ.get("DEPLOYMENT_REQUEST_ID")
+        or os.environ.get("GITHUB_RUN_ID"),
+        os.environ.get("GITHUB_RUNNER_NAME") or os.environ.get("COMPUTERNAME", "local"),
+    )
+
+
 def run_git(*args: str) -> str:
     result = subprocess.run(
         ["git", *args], check=True, capture_output=True, text=True
     )
     return result.stdout.strip()
+
+
+def git_branch_name(commit: str) -> str:
+    branch = run_git("branch", "--show-current")
+    return branch or f"DETACHED:{commit}"
 
 
 def environment_tag(environment: str, configured_tag: str | None) -> str:
@@ -186,7 +221,18 @@ def upload_python_file(session: Session, artifact: Artifact) -> None:
 
 
 def retire_and_record(
-    session: Session, artifact: Artifact, environment: str, commit: str, deployment_id: str
+    session: Session,
+    artifact: Artifact,
+    environment: str,
+    commit: str,
+    branch: str,
+    target_ref: str,
+    promotion_tag: str,
+    previous_hash: str | None,
+    started_at: datetime,
+    request_id: str | None,
+    runner_name: str,
+    deployment_id: str,
 ) -> None:
     session.sql(
         f"update {LEDGER_TABLE} set is_active = false "
@@ -195,9 +241,28 @@ def retire_and_record(
     ).collect()
     session.sql(
         f"insert into {LEDGER_TABLE} "
-        "(object_name, sha256_hash, git_commit, environment, is_active, deployment_id) "
-        "values (?, ?, ?, ?, true, ?)",
-        params=[artifact.key, artifact.sha256, commit, environment, deployment_id],
+        "(object_name, source_path, artifact_type, sha256_hash, previous_hash, "
+        "git_commit, git_branch, target_ref, release_tag, promotion_tag, environment, is_active, "
+        "deployment_status, started_at, completed_at, request_id, runner_name, deployment_id) "
+        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, 'SUCCESS', ?, ?, ?, ?, ?)",
+        params=[
+            artifact.key,
+            artifact.key,
+            artifact_type(artifact),
+            artifact.sha256,
+            previous_hash,
+            commit,
+            branch,
+            target_ref,
+            release_tag(),
+            promotion_tag,
+            environment,
+            started_at,
+            datetime.now(timezone.utc),
+            request_id,
+            runner_name,
+            deployment_id,
+        ],
     ).collect()
 
 
@@ -315,6 +380,10 @@ def deploy(args: argparse.Namespace) -> int:
     deployment_id = str(uuid.uuid4())
 
     commit = run_git("rev-parse", "HEAD")
+    branch = git_branch_name(commit)
+    promotion_tag = environment_tag(args.environment, args.environment_tag)
+    started_at = datetime.now(timezone.utc)
+    request_id, runner_name = deployment_context()
     transaction_started = False
     try:
         active_hashes = load_active_hashes(session, args.environment)
@@ -334,7 +403,20 @@ def deploy(args: argparse.Namespace) -> int:
                 execute_sql_file(session, artifact)
             else:
                 upload_python_file(session, artifact)
-            retire_and_record(session, artifact, args.environment, commit, deployment_id)
+            retire_and_record(
+                session,
+                artifact,
+                args.environment,
+                commit,
+                branch,
+                target_ref,
+                promotion_tag,
+                active_hashes.get(artifact.key),
+                started_at,
+                request_id,
+                runner_name,
+                deployment_id,
+            )
         session.sql("commit").collect()
         transaction_started = False
         if args.update_environment_tag:
