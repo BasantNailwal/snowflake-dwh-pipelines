@@ -22,8 +22,8 @@ snowflake-dwh-pipelines/
     stateful/
       tables/                 # forward-only CREATE/ALTER migrations
     snowpark/
-      procedures/              # .py modules exposing register(session)
-      functions/               # .py modules exposing register(session)
+      procedures/              # standalone .py handlers plus companion SQL
+      functions/               # standalone .py handlers plus companion SQL
   requirements.txt
   DEPLOYMENT_BLUEPRINT.md
 ```
@@ -33,7 +33,7 @@ Stateless artifacts describe the current desired definition and may be replaced.
 ## Ledger contract
 
 Run [deployment/ledger.sql](deployment/ledger.sql) once in the deployment schema. The table is append-only. For each `(environment, object_name)`, the engine retires the previous active row and inserts a new active row after the artifact has executed. `object_name` is the repository-relative path, which avoids ambiguous Snowflake names when one file registers more than one object. `deployment_id` groups all rows from one transaction.
-
+  Each Snowpark Python file is a standalone handler. The engine uploads it with `session.file.put` to `@DEPLOYMENT_STAGE/SNOWPARK`, then executes the companion SQL file, whose `IMPORTS` clause points to the staged file and whose `HANDLER` names the Python function. It does not call `sproc.register`.
 The engine performs the ledger read, artifact execution, and ledger version updates in one Snowpark session and explicitly commits or rolls back. Each ledger row records the source path and artifact type, Git branch (`git_branch`), commit, target ref, immutable Git release tag, environment promotion tag, previous hash, status, timing, request ID, and runner. Detached-HEAD deployments use `DETACHED:<commit>` as the branch value. `release_tag` comes from an exact Git tag on `HEAD`; `promotion_tag` is the environment pointer such as `env-uat` or `env-prod`. The ledger writes are transactionally grouped, but Snowflake DDL can implicitly commit, so a failed DDL deployment cannot be treated as a guaranteed database rollback. The sequence is:
 
 1. Resolve the explicit `--target-ref`, or choose an environment convention and fall back to `origin/main`.
@@ -93,3 +93,56 @@ order by deployed_at desc;
 ```
 
 The ledger is not a substitute for Snowflake object metadata or query history. Retain query/access history for forensic detail, and grant the deployment role only the DDL and ledger privileges required for its environment.
+
+## Execution flow
+
+1. Parse the required environment and optional target, connection, dry-run, tag, and guardrail arguments.
+2. Resolve `target_ref`. An explicit value wins; otherwise the engine tries environment conventions such as `env-uat`, `origin/env-uat`, `origin/uat`, an `env-uat` tag, and finally `origin/main`.
+3. For a live deployment, reject a dirty working tree. Dry runs may inspect staged, unstaged, and untracked artifact files.
+4. Verify that the target ref is an ancestor of `HEAD`, unless `--skip-ancestor-check` is explicitly supplied.
+5. Read the three-dot committed diff, or the target-to-working-tree scope for dry runs, and retain only `.sql` and `.py` files under approved artifact roots.
+6. Compute SHA-256 hashes and add a companion procedure SQL file when a Snowpark Python hash changed.
+7. Open Snowflake and read active hashes for the selected environment.
+8. Print the plan. Matching active hashes are skipped.
+9. In live mode, begin a transaction. Execute SQL files or upload Python files to the internal stage, then execute companion procedure SQL.
+10. Retire the prior active ledger row and insert a successful row containing Git, promotion, timing, and runner metadata.
+11. Commit Snowflake work. Only after commit succeeds, update the local environment promotion tag and optionally push it to `origin`.
+12. On an execution error before commit, roll back the transaction and leave the environment tag unchanged.
+
+## FAQ
+
+### Why can `target_ref` and `promotion_tag` have the same value?
+
+That is normal. For a UAT promotion, `target_ref` may be `env-uat`, meaning the diff starts at the last UAT deployment, and `promotion_tag` is also `env-uat`, meaning the tag will move to the newly deployed commit after success.
+
+### Why can `release_tag` contain another environment tag?
+
+Older versions used any exact Git tag on `HEAD` as `release_tag`. The current model treats `release_tag` as immutable release metadata and `promotion_tag` as the environment pointer. Existing historical rows may retain the old value; new rows should use `promotion_tag` for `env-*` tags.
+
+### How do I perform the first promotion to an environment?
+
+Use the repository root commit as `--target-ref`, preview, then deploy. After success, the engine creates or updates `env-<environment>`.
+
+### What does a dry run change?
+
+Nothing in Git or Snowflake. It reads the ledger, includes working-tree artifacts, prints hash differences, and previews the environment tag movement.
+
+### Why are uncommitted files allowed in dry run but not live deployment?
+
+Dry runs are previews of local intent. Live ledger rows record `HEAD`, so deploying dirty files would make the recorded commit inaccurate.
+
+### What happens when a Snowpark Python file changes?
+
+The engine uploads the Python file to `@DEPLOYMENT_STAGE/SNOWPARK` and executes its companion SQL procedure definition, even if the companion SQL hash itself did not change.
+
+### Does the engine infer deletes?
+
+No. Deleted files are ignored. Use explicit SQL for object removal or a reviewed reverse migration for stateful objects.
+
+### How do I roll back?
+
+Create a branch from the latest target branch, run `git revert <bad-commit>`, preview the inverse change, and deploy that new commit. The ledger records a new hash and preserves the original history.
+
+### What does the ledger record?
+
+It records artifact identity, current and previous hashes, environment, Git commit and branch, target ref, release and promotion tags, status, timing, request/runner metadata, and deployment ID.
