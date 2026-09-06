@@ -227,6 +227,7 @@ def retire_and_record(
     commit: str,
     branch: str,
     target_ref: str,
+    promotion_tag: str,
     previous_hash: str | None,
     started_at: datetime,
     request_id: str | None,
@@ -241,9 +242,9 @@ def retire_and_record(
     session.sql(
         f"insert into {LEDGER_TABLE} "
         "(object_name, source_path, artifact_type, sha256_hash, previous_hash, "
-        "git_commit, git_branch, target_ref, release_tag, environment, is_active, "
+        "git_commit, git_branch, target_ref, release_tag, promotion_tag, environment, is_active, "
         "deployment_status, started_at, completed_at, request_id, runner_name, deployment_id) "
-        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, 'SUCCESS', ?, ?, ?, ?, ?)",
+        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, 'SUCCESS', ?, ?, ?, ?, ?)",
         params=[
             artifact.key,
             artifact.key,
@@ -254,6 +255,7 @@ def retire_and_record(
             branch,
             target_ref,
             release_tag(),
+            promotion_tag,
             environment,
             started_at,
             datetime.now(timezone.utc),
@@ -379,6 +381,7 @@ def deploy(args: argparse.Namespace) -> int:
 
     commit = run_git("rev-parse", "HEAD")
     branch = git_branch_name(commit)
+    promotion_tag = environment_tag(args.environment, args.environment_tag)
     started_at = datetime.now(timezone.utc)
     request_id, runner_name = deployment_context()
     transaction_started = False
@@ -407,6 +410,7 @@ def deploy(args: argparse.Namespace) -> int:
                 commit,
                 branch,
                 target_ref,
+                promotion_tag,
                 active_hashes.get(artifact.key),
                 started_at,
                 request_id,

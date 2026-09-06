@@ -11,6 +11,7 @@ create table if not exists deployment_ledger (
     git_branch varchar not null,
     target_ref varchar not null,
     release_tag varchar,
+    promotion_tag varchar,
     environment varchar not null,
     is_active boolean not null default true,
     deployment_status varchar not null default 'SUCCESS',
@@ -34,6 +35,7 @@ alter table deployment_ledger add column if not exists artifact_type varchar;
 alter table deployment_ledger add column if not exists previous_hash varchar(64);
 alter table deployment_ledger add column if not exists target_ref varchar;
 alter table deployment_ledger add column if not exists release_tag varchar;
+alter table deployment_ledger add column if not exists promotion_tag varchar;
 alter table deployment_ledger add column if not exists deployment_status varchar default 'SUCCESS';
 alter table deployment_ledger add column if not exists failure_reason varchar;
 alter table deployment_ledger add column if not exists started_at timestamp_ltz;
@@ -44,4 +46,3 @@ alter table deployment_ledger add column if not exists snowflake_query_id varcha
 
 
 
-select * from DE_LAB.RAW.DEPLOYMENT_LEDGER a;
