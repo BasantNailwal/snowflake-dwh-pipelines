@@ -25,3 +25,4 @@ connections.toml
 *.log
 .DS_Store
 Thumbs.db
+/extra
