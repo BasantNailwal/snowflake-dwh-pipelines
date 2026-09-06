@@ -50,9 +50,9 @@ Deleted files are intentionally ignored. A deletion is a deployment design decis
 
 ```powershell
 python -m pip install -r requirements.txt
-python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev
+python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --warehouse DEV_WH --password-auth
 # Preview only; reads the ledger but does not execute or mutate anything.
-python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --dry-run
+python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --warehouse DEV_WH --password-auth --dry-run
 ```
 
 Dry-run output lists every branch-scoped artifact whose active environment hash
@@ -61,7 +61,7 @@ It still requires Snowflake credentials because the active ledger is the source
 of truth. It does not start a transaction, execute SQL or Python registration
 code, or write ledger rows.
 
-For local execution, `--connection-name dev` reads the named connection from the Snowflake connector's `connections.toml` file, normally `~/.snowflake/connections.toml` on Windows. You can also set `SNOWFLAKE_CONNECTION_NAME=dev`. If no connection name is supplied, the engine uses `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production.
+For local execution, `--connection-name dev` reads the named connection from the Snowflake connector's `connections.toml` file, normally `~/.snowflake/connections.toml` on Windows. `--password-auth` explicitly switches that profile to username/password authentication, and `--warehouse DEV_WH` overrides a missing or placeholder warehouse. Replace `DEV_WH` with a real warehouse name. You can also set `SNOWFLAKE_CONNECTION_NAME=dev` and `SNOWFLAKE_WAREHOUSE`. If no connection name is supplied, the engine uses `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production.
 
 ## Rollback and guardrails
 

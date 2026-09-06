@@ -1,20 +1,17 @@
 """Deploy branch-scoped SQL and Snowpark registrations to Snowflake.
 
-Each Snowpark Python artifact must expose:
-
-    def register(session: snowflake.snowpark.Session) -> None:
-        session.sproc.register(...)
-
-The registration function is invoked inside the same Snowflake transaction used
-for SQL artifacts and ledger updates.
+Snowpark Python artifacts are uploaded to an internal stage. Their companion
+SQL artifact creates or replaces the procedure with an IMPORTS clause.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+from io import StringIO
 import os
 import subprocess
+import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,7 +98,7 @@ def load_active_hashes(session: Session, environment: str) -> dict[str, str]:
 
 def execute_sql_file(session: Session, artifact: Artifact) -> None:
     sql = artifact.path.read_text(encoding="utf-8")
-    for statement, _ in split_statements(sql):
+    for statement, _ in split_statements(StringIO(sql)):
         if statement.strip():
             session.sql(statement).collect()
 
@@ -143,9 +140,20 @@ def connection_parameters() -> dict[str, str]:
     }
 
 
-def create_session(connection_name: str | None) -> Session:
+def create_session(
+    connection_name: str | None, warehouse: str | None, password_auth: bool
+) -> Session:
     if connection_name:
-        return Session.builder.config("connection_name", connection_name).create()
+        if not warehouse and not password_auth:
+            return Session.builder.config("connection_name", connection_name).create()
+        config_path = Path.home() / ".snowflake" / "connections.toml"
+        with config_path.open("rb") as stream:
+            config = tomllib.load(stream)[connection_name].copy()
+        if warehouse:
+            config["warehouse"] = warehouse
+        if password_auth:
+            config["authenticator"] = "snowflake"
+        return Session.builder.configs(config).create()
     return Session.builder.configs(connection_parameters()).create()
 
 
@@ -208,7 +216,7 @@ def deploy(args: argparse.Namespace) -> int:
         print("No supported artifacts changed in the branch scope.")
         return 0
 
-    session = create_session(args.connection_name)
+    session = create_session(args.connection_name, args.warehouse, args.password_auth)
     deployment_id = str(uuid.uuid4())
     commit = run_git("rev-parse", "HEAD")
     transaction_started = False
@@ -248,6 +256,16 @@ def parse_args() -> argparse.Namespace:
         "--connection-name",
         default=os.environ.get("SNOWFLAKE_CONNECTION_NAME"),
         help="Name from ~/.snowflake/connections.toml; otherwise use SNOWFLAKE_* variables",
+    )
+    parser.add_argument(
+        "--warehouse",
+        default=os.environ.get("SNOWFLAKE_WAREHOUSE"),
+        help="Override the warehouse in the named connections.toml profile",
+    )
+    parser.add_argument(
+        "--password-auth",
+        action="store_true",
+        help="Use the password in connections.toml instead of browser/OAuth authentication",
     )
     parser.add_argument(
         "--dry-run",
