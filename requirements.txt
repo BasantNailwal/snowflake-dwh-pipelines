@@ -1,0 +1,2 @@
+snowflake-connector-python>=3.18,<4
+snowflake-snowpark-python>=1.40,<2
