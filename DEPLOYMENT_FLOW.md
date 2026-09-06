@@ -6,7 +6,7 @@ This framework uses Git to define the requested change set and the Snowflake led
 
 ```mermaid
 flowchart TB
-  subgraph Repository[Git repository]
+  subgraph Repository
     SQL[SQL artifacts\nviews, procedures, tables]
     PY[SNOWPARK/*.py\nstandalone handlers]
     PROC[SNOWPARK/*.sql\nCREATE OR REPLACE PROCEDURE]
@@ -14,15 +14,15 @@ flowchart TB
     LEDGER_DDL[deployment/ledger.sql]
   end
 
-  subgraph GitControl[Git control]
+  subgraph GitControl
     TARGET[Target ref\nenv-uat, env-prod, origin/main]
     HEAD[HEAD commit]
     RELEASE[Immutable release tag\nrelease-2026.09]
     PROMOTION[Environment tag\nenv-uat, env-prod]
   end
 
-  subgraph Snowflake[Snowflake]
-    STAGE[@DEPLOYMENT_STAGE/SNOWPARK]
+  subgraph Snowflake
+    STAGE["@DEPLOYMENT_STAGE/SNOWPARK"]
     OBJECTS[Views, tables, procedures]
     LEDGER[DEPLOYMENT_LEDGER]
   end
