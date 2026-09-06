@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import os
 import subprocess
-import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,8 +24,10 @@ from snowflake.connector.util_text import split_statements
 from snowflake.snowpark import Session
 
 LEDGER_TABLE = "DEPLOYMENT_LEDGER"
+SNOWPARK_STAGE = "@DEPLOYMENT_STAGE/SNOWPARK"
 SUPPORTED_SUFFIXES = {".sql", ".py"}
 EXCLUDED_PARTS = {"__pycache__", ".venv", ".git"}
+ARTIFACT_ROOTS = {"SQL", "FILES", "SNOWPARK", "snowflake"}
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,8 @@ def sha256_file(path: Path) -> str:
 def collect_artifacts(paths: Iterable[Path], root: Path) -> list[Artifact]:
     artifacts = []
     for path in paths:
+        if not path.parts or path.parts[0] not in ARTIFACT_ROOTS:
+            continue
         if path.suffix.lower() not in SUPPORTED_SUFFIXES or not path.is_file():
             continue
         if any(part in EXCLUDED_PARTS for part in path.parts):
@@ -85,7 +87,7 @@ def collect_artifacts(paths: Iterable[Path], root: Path) -> list[Artifact]:
                 sha256=sha256_file(resolved),
             )
         )
-    return artifacts
+    return sorted(artifacts, key=lambda artifact: artifact.key)
 
 
 def load_active_hashes(session: Session, environment: str) -> dict[str, str]:
@@ -104,21 +106,13 @@ def execute_sql_file(session: Session, artifact: Artifact) -> None:
             session.sql(statement).collect()
 
 
-def execute_python_file(session: Session, artifact: Artifact) -> None:
-    module_name = f"deployment_artifact_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, artifact.path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load Snowpark artifact: {artifact.key}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-        register = getattr(module, "register", None)
-        if not callable(register):
-            raise AttributeError(f"{artifact.key} must define register(session)")
-        register(session)
-    finally:
-        sys.modules.pop(module_name, None)
+def upload_python_file(session: Session, artifact: Artifact) -> None:
+    session.file.put(
+        str(artifact.path),
+        SNOWPARK_STAGE,
+        auto_compress=False,
+        overwrite=True,
+    )
 
 
 def retire_and_record(
@@ -149,10 +143,44 @@ def connection_parameters() -> dict[str, str]:
     }
 
 
-def print_plan(
+def create_session(connection_name: str | None) -> Session:
+    if connection_name:
+        return Session.builder.config("connection_name", connection_name).create()
+    return Session.builder.configs(connection_parameters()).create()
+
+
+def pending_artifacts(
     changed: list[Artifact], active_hashes: dict[str, str]
 ) -> list[Artifact]:
     pending = [item for item in changed if active_hashes.get(item.key) != item.sha256]
+    pending_keys = {item.key for item in pending}
+    for artifact in changed:
+        if artifact.path.suffix.lower() != ".py":
+            continue
+        companion = artifact.path.with_suffix(".sql")
+        if not companion.is_file():
+            raise ValueError(f"Snowpark file requires companion procedure SQL: {artifact.key}")
+        companion_key = Path(artifact.key).with_suffix(".sql").as_posix()
+        if companion_key in pending_keys:
+            continue
+        companion_artifact = next(
+            (item for item in changed if item.key == companion_key), None
+        )
+        if companion_artifact is None:
+            companion_artifact = Artifact(
+                path=companion,
+                key=companion_key,
+                sha256=sha256_file(companion),
+            )
+        pending.append(companion_artifact)
+        pending_keys.add(companion_key)
+    return sorted(pending, key=lambda artifact: artifact.key)
+
+
+def print_plan(
+    changed: list[Artifact], active_hashes: dict[str, str]
+) -> list[Artifact]:
+    pending = pending_artifacts(changed, active_hashes)
     print(f"Branch artifacts: {len(changed)}; pending deployments: {len(pending)}")
     if not pending:
         print("Nothing would be deployed.")
@@ -162,6 +190,8 @@ def print_plan(
     for artifact in pending:
         previous = active_hashes.get(artifact.key)
         action = "NEW" if previous is None else "CHANGED"
+        if previous == artifact.sha256:
+            action = "RECREATE"
         previous_display = previous or "<none>"
         print(
             f"  {action:7} {artifact.path.suffix.lower():4} {artifact.key} "
@@ -178,7 +208,7 @@ def deploy(args: argparse.Namespace) -> int:
         print("No supported artifacts changed in the branch scope.")
         return 0
 
-    session = Session.builder.configs(connection_parameters()).create()
+    session = create_session(args.connection_name)
     deployment_id = str(uuid.uuid4())
     commit = run_git("rev-parse", "HEAD")
     transaction_started = False
@@ -197,7 +227,7 @@ def deploy(args: argparse.Namespace) -> int:
             if artifact.path.suffix.lower() == ".sql":
                 execute_sql_file(session, artifact)
             else:
-                execute_python_file(session, artifact)
+                upload_python_file(session, artifact)
             retire_and_record(session, artifact, args.environment, commit, deployment_id)
         session.sql("commit").collect()
     except Exception:
@@ -214,6 +244,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--environment", required=True, choices=["DEV", "SIT", "UAT", "PROD"])
     parser.add_argument("--target-ref", default="origin/main")
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument(
+        "--connection-name",
+        default=os.environ.get("SNOWFLAKE_CONNECTION_NAME"),
+        help="Name from ~/.snowflake/connections.toml; otherwise use SNOWFLAKE_* variables",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

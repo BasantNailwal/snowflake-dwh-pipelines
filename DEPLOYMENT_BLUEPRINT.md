@@ -1,6 +1,6 @@
 # Snowflake deployment blueprint
 
-This framework treats Git as the requested change set and Snowflake as the applied-state authority. A file is deployed only when it is in `git diff origin/main...HEAD --name-only` and its SHA-256 differs from the active ledger row for the target environment.
+This framework treats Git as the requested change set and Snowflake as the applied-state authority. A file is deployed only when it is in `git diff origin/main...HEAD --name-only`, is under `SQL/`, `FILES/`, `SNOWPARK/`, or `snowflake/`, and its SHA-256 differs from the active ledger row for the target environment.
 
 ## Repository layout
 
@@ -10,6 +10,10 @@ snowflake-dwh-pipelines/
   deployment/
     deploy.py                 # branch scope, hashing, execution, ledger transaction
     ledger.sql                # run once by an administrator
+  SNOWPARK/
+    00_create_stage.sql       # internal stage used for permanent registrations
+    hello_procedure.py        # standalone handler uploaded to the internal stage
+    hello_procedure.sql       # CREATE OR REPLACE PROCEDURE with IMPORTS
   snowflake/
     stateless/
       views/                  # CREATE OR REPLACE VIEW
@@ -24,7 +28,7 @@ snowflake-dwh-pipelines/
   DEPLOYMENT_BLUEPRINT.md
 ```
 
-Stateless artifacts describe the current desired definition and may be replaced. Table changes are forward-only migrations: use a new, ordered file for each change and do not edit an applied migration. Snowpark modules must define a `register(session)` function that registers their procedure or UDF; registration code must be deterministic and idempotent.
+Stateless artifacts describe the current desired definition and may be replaced. Table changes are forward-only migrations: use a new, ordered file for each change and do not edit an applied migration. Each Snowpark Python file is a standalone handler. The engine uploads it with `session.file.put` to `@DEPLOYMENT_STAGE/SNOWPARK`, then executes the companion SQL file, whose `IMPORTS` clause points to the staged file and whose `HANDLER` names the Python function.
 
 ## Ledger contract
 
@@ -40,15 +44,15 @@ The engine performs the ledger read, artifact execution, and ledger version upda
 6. Set the old ledger row inactive and insert the new active row.
 7. Commit the ledger state, or roll back uncommitted ledger work. If DDL has already committed, reconcile the object and ledger before retrying.
 
-Deleted files are intentionally ignored. A deletion is a deployment design decision: use an explicit SQL migration for a table, or a deliberate replacement definition for a stateless object. Never infer a destructive database operation from a branch diff.
+Deleted files are intentionally ignored. A deletion is a deployment design decision: use an explicit SQL migration for a table, or a deliberate replacement definition for a stateless object. Never infer a destructive database operation from a branch diff. `FILES/` is an allowed input root, but the current engine executes only `.sql` and `.py`; files such as `FILES/data.csv` require a separate staged-load step and are not silently treated as SQL. Artifacts are sorted by path, so `SNOWPARK/00_create_stage.sql` runs before the Python upload and its companion procedure SQL. If a Python hash changes, the companion SQL is redeployed even when its own hash is unchanged, ensuring the procedure package picks up the new staged source.
 
 ## Local execution
 
 ```powershell
 python -m pip install -r requirements.txt
-python deployment/deploy.py --environment DEV --target-ref origin/main
+python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev
 # Preview only; reads the ledger but does not execute or mutate anything.
-python deployment/deploy.py --environment DEV --target-ref origin/main --dry-run
+python deployment/deploy.py --environment DEV --target-ref origin/main --connection-name dev --dry-run
 ```
 
 Dry-run output lists every branch-scoped artifact whose active environment hash
@@ -57,7 +61,7 @@ It still requires Snowflake credentials because the active ledger is the source
 of truth. It does not start a transaction, execute SQL or Python registration
 code, or write ledger rows.
 
-Required environment variables are `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production; adapt the connection parameter block to the selected authenticator.
+For local execution, `--connection-name dev` reads the named connection from the Snowflake connector's `connections.toml` file, normally `~/.snowflake/connections.toml` on Windows. You can also set `SNOWFLAKE_CONNECTION_NAME=dev`. If no connection name is supplied, the engine uses `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. In CI, use an environment-scoped secret set and approvals for UAT and PROD. Prefer key-pair or workload identity authentication over a password in production.
 
 ## Rollback and guardrails
 

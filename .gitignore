@@ -1,0 +1,27 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Snowflake credentials and connection profiles
+connections.toml
+.snowflake/
+
+# IDE and editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local logs and generated files
+*.log
+.DS_Store
+Thumbs.db

@@ -1,4 +1,5 @@
 -- Run once in the deployment control schema.
+-- select current_schema() as schema_name;
 create or replace table deployment_ledger (
     ledger_id number autoincrement start 1 increment 1,
     object_name varchar not null,
@@ -17,3 +18,4 @@ create or replace table deployment_ledger (
 -- in the same transaction as the artifact deployment.
 comment on table deployment_ledger is
     'Append-only deployment history. The active row per environment/object is the applied version.';
+
