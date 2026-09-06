@@ -34,7 +34,7 @@ Stateless artifacts describe the current desired definition and may be replaced.
 
 Run [deployment/ledger.sql](deployment/ledger.sql) once in the deployment schema. The table is append-only. For each `(environment, object_name)`, the engine retires the previous active row and inserts a new active row after the artifact has executed. `object_name` is the repository-relative path, which avoids ambiguous Snowflake names when one file registers more than one object. `deployment_id` groups all rows from one transaction.
 
-The engine performs the ledger read, artifact execution, and ledger version updates in one Snowpark session and explicitly commits or rolls back. The ledger writes are transactionally grouped, but Snowflake DDL can implicitly commit, so a failed DDL deployment cannot be treated as a guaranteed database rollback. The sequence is:
+The engine performs the ledger read, artifact execution, and ledger version updates in one Snowpark session and explicitly commits or rolls back. Each ledger row records the source path and artifact type, Git branch (`git_branch`), commit, target ref, release tag, previous hash, status, timing, request ID, and runner. Detached-HEAD deployments use `DETACHED:<commit>` as the branch value. The ledger writes are transactionally grouped, but Snowflake DDL can implicitly commit, so a failed DDL deployment cannot be treated as a guaranteed database rollback. The sequence is:
 
 1. Resolve the explicit `--target-ref`, or choose an environment convention and fall back to `origin/main`.
 2. Verify the target ref is an ancestor of `HEAD`, unless the emergency override is used.
@@ -78,7 +78,9 @@ The workflow in [.github/workflows/deploy.yml](.github/workflows/deploy.yml) use
 
 ```sql
 -- Current applied version by environment and artifact.
-select environment, object_name, sha256_hash, git_commit, deployed_at
+select environment, object_name, artifact_type, sha256_hash, previous_hash,
+       git_commit, git_branch, target_ref, release_tag, deployment_status,
+       started_at, completed_at, request_id, runner_name, deployed_at
 from deployment_ledger
 where is_active
 order by environment, object_name;
